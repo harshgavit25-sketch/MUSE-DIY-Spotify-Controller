@@ -1,1 +1,16 @@
+```bat
+@echo off
+title MUSE Spotify Controller
 
+:: Open Spotify
+start "" "spotify:"
+timeout /t 5 /nobreak >nul
+
+:: Send Play/Pause media key
+powershell -NoProfile -Command "$w=New-Object -ComObject WScript.Shell; $w.SendKeys([char]179)"
+
+:: Start MUSE controller
+start "MUSE Controller" cmd /k "py -3.12 ""%USERPROFILE%\Desktop\muse_spotifyv6.py"""
+
+exit
+``
