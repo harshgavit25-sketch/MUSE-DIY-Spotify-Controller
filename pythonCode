@@ -1,16 +1,237 @@
-```bat
-@echo off
-title MUSE Spotify Controller
 
-:: Open Spotify
-start "" "spotify:"
-timeout /t 5 /nobreak >nul
+import asyncio
+import ctypes
+import io
+import threading
+import time
+import serial
 
-:: Send Play/Pause media key
-powershell -NoProfile -Command "$w=New-Object -ComObject WScript.Shell; $w.SendKeys([char]179)"
+from PIL import Image
+from pycaw.pycaw import AudioUtilities
+from winsdk.windows.media.control import (
+    GlobalSystemMediaTransportControlsSessionManager
+)
+from winsdk.windows.storage.streams import DataReader
 
-:: Start MUSE controller
-start "MUSE Controller" cmd /k "py -3.12 ""%USERPROFILE%\Desktop\muse_spotifyv6.py"""
+PORT = "COM11"
+BAUD = 115200
 
-exit
-``
+VK_PREV = 0xB1
+VK_PLAY_PAUSE = 0xB3
+VK_NEXT = 0xB0
+KEYUP = 0x0002
+
+serial_lock = threading.Lock()
+
+
+def send_line(esp, text):
+    with serial_lock:
+        esp.write((text + "\n").encode("utf-8"))
+
+
+def media_key(key):
+    ctypes.windll.user32.keybd_event(key, 0, 0, 0)
+    ctypes.windll.user32.keybd_event(key, 0, KEYUP, 0)
+
+
+def spotify_session():
+    for session in AudioUtilities.GetAllSessions():
+        p = session.Process
+        if p and p.name().lower() == "spotify.exe":
+            return session
+    return None
+
+
+def set_volume(value):
+    session = spotify_session()
+    if session:
+        session.SimpleAudioVolume.SetMasterVolume(
+            max(0, min(100, value)) / 100.0, None
+        )
+
+
+def toggle_mute():
+    session = spotify_session()
+    if session:
+        audio = session.SimpleAudioVolume
+        audio.SetMute(not bool(audio.GetMute()), None)
+
+
+def handle_button(name):
+    if name == "PREV":
+        media_key(VK_PREV)
+    elif name == "PLAY":
+        media_key(VK_PLAY_PAUSE)
+    elif name == "NEXT":
+        media_key(VK_NEXT)
+    elif name == "MUTE":
+        toggle_mute()
+
+
+async def thumbnail_bytes(props):
+    stream = None
+    reader = None
+
+    try:
+        if props.thumbnail is None:
+            return None
+
+        stream = await props.thumbnail.open_read_async()
+        size = int(stream.size)
+
+        if size <= 0 or size > 5_000_000:
+            return None
+
+        reader = DataReader(stream.get_input_stream_at(0))
+        await reader.load_async(size)
+        data = reader.read_bytes(size)
+        return bytes(data)
+
+    except Exception as e:
+        print("Thumbnail unavailable:", e)
+        return None
+
+    finally:
+        if reader:
+            reader.close()
+        if stream:
+            stream.close()
+
+
+def make_oled_art(raw):
+    if not raw:
+        return None
+
+    try:
+        image = Image.open(io.BytesIO(raw))
+        image = image.convert("L").resize((32, 32))
+        image = image.point(lambda p: 255 if p > 128 else 0)
+        image = image.convert("1")
+
+        # Pillow's packed 1-bit rows match SSD1306 bitmap format.
+        return image.tobytes()
+
+    except Exception as e:
+        print("Image conversion failed:", e)
+        return None
+
+
+def send_art(esp, raw):
+    bitmap = make_oled_art(raw)
+    if bitmap is not None and len(bitmap) == 128:
+        send_line(esp, "ART:" + bitmap.hex())
+
+
+def seconds(value):
+    if hasattr(value, "total_seconds"):
+        return value.total_seconds()
+    return float(value) / 10_000_000
+
+
+async def metadata_loop(esp):
+    manager = await (
+        GlobalSystemMediaTransportControlsSessionManager
+        .request_async()
+    )
+
+    last_track = None
+    last_progress_time = 0
+
+    while True:
+        try:
+            chosen = None
+
+            for session in manager.get_sessions():
+                source = session.source_app_user_model_id or ""
+                if "spotify" in source.lower():
+                    chosen = session
+                    break
+
+            if chosen:
+                props = await chosen.try_get_media_properties_async()
+                title = (props.title or "Unknown track").replace("\n", " ")
+                artist = (props.artist or "Unknown artist").replace("\n", " ")
+                track = (title, artist)
+
+                if track != last_track:
+                    send_line(esp, "TITLE:" + title[:80])
+                    send_line(esp, "ARTIST:" + artist[:80])
+
+                    raw = await thumbnail_bytes(props)
+                    if raw:
+                        send_art(esp, raw)
+                    else:
+                        print("No artwork exposed for this track.")
+
+                    print("Now playing:", title, "-", artist)
+                    last_track = track
+
+                now = time.monotonic()
+
+                if now - last_progress_time >= 1:
+                    timeline = chosen.get_timeline_properties()
+
+                    position = max(
+                        0, int(seconds(timeline.position) * 1000)
+                    )
+                    duration = max(
+                        0,
+                        int(
+                            (seconds(timeline.end_time)
+                             - seconds(timeline.start_time)) * 1000
+                        )
+                    )
+
+                    send_line(esp, f"PROG:{position},{duration}")
+                    last_progress_time = now
+
+        except Exception as e:
+            print("Media metadata error:", e)
+
+        await asyncio.sleep(1)
+
+
+def metadata_worker(esp):
+    asyncio.run(metadata_loop(esp))
+
+
+def main():
+    print("Connecting to MUSE on", PORT)
+
+    with serial.Serial(PORT, BAUD, timeout=0.5) as esp:
+        time.sleep(2)
+
+        threading.Thread(
+            target=metadata_worker, args=(esp,), daemon=True
+        ).start()
+
+        print("MUSE connected. Play a Spotify track.")
+
+        last_volume = None
+
+        while True:
+            line = esp.readline().decode(
+                "utf-8", errors="ignore"
+            ).strip()
+
+            if line.startswith("VOL:"):
+                try:
+                    volume = int(line[4:])
+                    if volume != last_volume:
+                        set_volume(volume)
+                        last_volume = volume
+                except ValueError:
+                    pass
+
+            elif line.startswith("BTN:"):
+                handle_button(line[4:])
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nMUSE stopped.")
+    except serial.SerialException as e:
+        print("Serial error:", e)
+        print("Check COM9 and close Arduino Serial Monitor.")
