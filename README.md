@@ -5,7 +5,8 @@
 MUSE is a DIY hardware project that brings physical music controls to your desktop. Built around an ESP32 microcontroller, it combines an OLED display, dedicated push buttons, LED indicators, and a Python desktop application to create a compact music-control interface.
 
 The controller displays track information and playback progress while allowing users to interact with music through physical buttons.
-<img width="1536" height="864" alt="Muse B" src="https://github.com/user-attachments/assets/4c58d702-f819-4821-98cd-a829f5e972ae" />
+<img width="3688" height="2074" alt="muse-final build" src="https://github.com/user-attachments/assets/fc114e04-4cc7-4258-aef6-53cdec6808a2" />
+
 
 
 > **Project Status:** Version 1.0 — Completed
