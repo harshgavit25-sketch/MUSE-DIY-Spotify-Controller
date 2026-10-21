@@ -7,6 +7,7 @@ MUSE is a DIY hardware project that brings physical music controls to your deskt
 The controller displays track information and playback progress while allowing users to interact with music through physical buttons.
 
 > **Project Status:** Version 1.0 — Completed
+> muse.jpeg
 
 ## ✨ Features
 
